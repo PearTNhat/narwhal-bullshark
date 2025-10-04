@@ -51,10 +51,10 @@ impl NodeRestarter {
         let network = anemo::Network::bind("127.0.0.1:0")
             .server_name("narwhal")
             .private_key(
-                NetworkKeyPair::generate(&mut rand::rngs::OsRng)
-                    .private()
-                    .0
-                    .to_bytes(),
+                {
+                    let keypair = fastcrypto::generate_production_keypair::<NetworkKeyPair>();
+                    keypair.private().0.to_bytes()
+                }
             )
             .start(anemo::Router::new())
             .unwrap();

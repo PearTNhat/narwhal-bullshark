@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use config::{SharedWorkerCache, WorkerId};
 use crypto::{NetworkPublicKey, PublicKey};
-use fastcrypto::Hash;
+use fastcrypto::hash::Hash;
 use futures::{stream::FuturesUnordered, StreamExt};
 use network::{LuckyNetwork, P2pNetwork, UnreliableNetwork};
 use std::{collections::HashSet, time::Duration};

@@ -35,7 +35,7 @@ anemo = { git = "https://github.com/mystenlabs/anemo.git", rev = "b145cbcf4a1917
 anemo-tower = { git = "https://github.com/mystenlabs/anemo.git", rev = "b145cbcf4a1917197e2b9ee6a1523afdb623dbf2" }
 anyhow = "1.0.65"
 
-store = { version = "0.1.0", package = "typed-store" }
+store = { git = "https://github.com/x3pi/mysten-infra.git", version = "0.4.0" , package = "typed-store" }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]

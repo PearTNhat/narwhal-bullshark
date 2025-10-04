@@ -12,7 +12,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use crypto::{traits::KeyPair, NetworkPublicKey};
 use multiaddr::Multiaddr;
-use rand::{rngs::SmallRng, SeedableRng as _};
+
+use rand::{rngs::SmallRng, rngs::StdRng, SeedableRng as _};
 use std::collections::HashMap;
 use tokio::{runtime::Handle, task::JoinHandle};
 use types::{
@@ -69,12 +70,11 @@ impl P2pNetwork {
         let routes = anemo::Router::new();
         let network = anemo::Network::bind("127.0.0.1:0")
             .server_name("narwhal")
-            .private_key(
-                crypto::NetworkKeyPair::generate(&mut rand::rngs::OsRng)
-                    .private()
-                    .0
-                    .to_bytes(),
-            )
+            .private_key({
+                let mut rng = StdRng::from_entropy();
+                let keypair = crypto::NetworkKeyPair::generate(&mut rng);
+                keypair.private().0.to_bytes()
+            })
             .start(routes)
             .unwrap();
         network

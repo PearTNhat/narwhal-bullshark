@@ -4,7 +4,7 @@
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use either::Either;
-use fastcrypto::Digest;
+use fastcrypto::hash::{Digest, Hash}; 
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use thiserror::Error;
@@ -16,9 +16,11 @@ use super::{Node, NodeRef, WeakNodeRef};
 /// - `compressible`: a value-derived boolean indicating if that value is, initially, compressible
 ///
 /// The `crypto:Hash` trait bound offers the digest-ibility.
-pub trait Affiliated: fastcrypto::Hash {
+const DIGEST_LEN: usize = 32;
+
+pub trait Affiliated:  Hash<DIGEST_LEN> {
     /// Hash pointers to the parents of the current value
-    fn parents(&self) -> Vec<<Self as fastcrypto::Hash>::TypedDigest>;
+    fn parents(&self) -> Vec<<Self as  Hash<DIGEST_LEN>>::TypedDigest>;
 
     /// Whether the current value should be marked as compressible when first inserted in a Node.
     /// Defaults to a blanket false for all values.
@@ -42,19 +44,19 @@ pub trait Affiliated: fastcrypto::Hash {
 /// as this will transitively drop all the nodes they point to and may cause loss of data.
 ///
 #[derive(Debug)]
-pub struct NodeDag<T: Affiliated> {
+pub struct NodeDag<T: Affiliated + Hash<DIGEST_LEN>> {
     // Not that we should need to ever serialize this (we'd rather rebuild the Dag from a persistent store)
     // but the way to serialize this in key order is using serde_with and an annotation of:
     // as = "FromInto<std::collections::BTreeMap<T::TypedDigest, Either<WeakNodeRef<T>, NodeRef<T>>>"
-    node_table: DashMap<T::TypedDigest, Either<WeakNodeRef<T>, NodeRef<T>>>,
+    node_table: DashMap<<T as Hash<DIGEST_LEN>>::TypedDigest, Either<WeakNodeRef<T>, NodeRef<T>>>,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum NodeDagError {
     #[error("No vertex known by these digests: {0:?}")]
-    UnknownDigests(Vec<Digest>),
+    UnknownDigests(Vec<Digest<DIGEST_LEN>>),
     #[error("The vertex known by this digest was dropped: {0}")]
-    DroppedDigest(Digest),
+    DroppedDigest(Digest<DIGEST_LEN>),
 }
 
 impl<T: Affiliated> NodeDag<T> {
@@ -253,15 +255,15 @@ impl<T: Affiliated> Default for NodeDag<T> {
 mod tests {
     use std::{collections::HashSet, fmt};
 
-    use fastcrypto::{Digest, Hash};
+    use fastcrypto::hash::{Digest, Hash};
     use proptest::prelude::*;
 
     use super::*;
 
     #[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
-    pub struct TestDigest([u8; fastcrypto::DIGEST_LEN]);
+    pub struct TestDigest([u8; DIGEST_LEN]);
 
-    impl From<TestDigest> for Digest {
+    impl From<TestDigest> for Digest<DIGEST_LEN>{
         fn from(hd: TestDigest) -> Self {
             Digest::new(hd.0)
         }
@@ -286,7 +288,7 @@ mod tests {
         digest: TestDigest,
     }
 
-    impl fastcrypto::Hash for TestNode {
+    impl Hash<DIGEST_LEN> for TestNode {
         type TypedDigest = TestDigest;
 
         fn digest(&self) -> Self::TypedDigest {
@@ -295,7 +297,7 @@ mod tests {
     }
 
     impl Affiliated for TestNode {
-        fn parents(&self) -> Vec<<Self as fastcrypto::Hash>::TypedDigest> {
+        fn parents(&self) -> Vec<<Self as Hash<DIGEST_LEN>>::TypedDigest> {
             self.parents.clone()
         }
 
@@ -306,7 +308,7 @@ mod tests {
 
     prop_compose! {
         pub fn arb_test_digest()(
-            hash in prop::collection::vec(any::<u8>(), fastcrypto::DIGEST_LEN..=fastcrypto::DIGEST_LEN),
+            hash in prop::collection::vec(any::<u8>(), DIGEST_LEN..=DIGEST_LEN),
         ) -> TestDigest {
             TestDigest(hash.try_into().unwrap())
         }
@@ -382,7 +384,7 @@ mod tests {
                 }
             });
             let mut nu_dag = NodeDag::new();
-            let random_parents_digests: Vec<Digest> = random_parents.iter().map(|digest| (*digest).into()).collect();
+            let random_parents_digests: Vec<Digest<DIGEST_LEN>> = random_parents.iter().map(|digest| Digest::from(*digest)).collect();
             let expected_error = NodeDagError::UnknownDigests(random_parents_digests);
             for node in nodes {
                 assert_eq!(expected_error, nu_dag.try_insert(node).err().unwrap())

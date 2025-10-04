@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use config::WorkerId;
-use fastcrypto::Hash;
+use fastcrypto::hash::Hash;
 use store::Store;
 use tokio::{sync::watch, task::JoinHandle};
 use types::{
@@ -43,7 +43,7 @@ impl Processor {
                         let digest = batch.digest();
 
                         // Store the batch.
-                        store.write(digest, batch).await;
+                        store.async_write(digest, batch).await;
 
                         // Deliver the batch's digest.
                         let message = match own_digest {

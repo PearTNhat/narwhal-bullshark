@@ -26,11 +26,11 @@ pub use fastcrypto::traits;
 // to change all four aliases to point to concrete types that work with each other. Failure to do
 // so will result in a ton of compilation errors, and worse: it will not make sense!
 
-pub type PublicKey = bls12381::BLS12381PublicKey;
-pub type Signature = bls12381::BLS12381Signature;
-pub type AggregateSignature = bls12381::BLS12381AggregateSignature;
-pub type PrivateKey = bls12381::BLS12381PrivateKey;
-pub type KeyPair = bls12381::BLS12381KeyPair;
+pub type PublicKey = fastcrypto::bls12381::min_pk::BLS12381PublicKey;
+pub type Signature = fastcrypto::bls12381::min_pk::BLS12381Signature;
+pub type AggregateSignature = fastcrypto::bls12381::min_pk::BLS12381AggregateSignature;
+pub type PrivateKey = fastcrypto::bls12381::min_pk::BLS12381PrivateKey;
+pub type KeyPair = fastcrypto::bls12381::min_pk::BLS12381KeyPair;
 
 // Example to use BLS12-377 instead:
 // #[cfg(feature = "celo")]

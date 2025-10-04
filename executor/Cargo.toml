@@ -33,7 +33,7 @@ network = { path = "../network", package = "narwhal-network" }
 crypto = { path = "../crypto", package = "narwhal-crypto" }
 anyhow = "1.0.65"
 
-store = { version = "0.1.0", package = "typed-store" }
+store = { git = "https://github.com/x3pi/mysten-infra.git", version = "0.4.0" , package = "typed-store" }
 workspace-hack = { version = "0.1", path = "../workspace-hack" }
 match_opt = "0.1.2"
 rand = "0.8.5"

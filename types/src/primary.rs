@@ -12,10 +12,13 @@ use config::{Committee, Epoch, SharedWorkerCache, Stake, WorkerId, WorkerInfo};
 use crypto::{AggregateSignature, PublicKey, Signature};
 use dag::node_dag::Affiliated;
 use derive_builder::Builder;
+// FIX 1: Corrected imports for fastcrypto.
 use fastcrypto::{
+    hash::{Digest, Hash, HashFunction},
     traits::{AggregateAuthenticator, EncodeDecodeBase64, Signer, VerifyingKey},
-    Digest, Hash, SignatureService, Verifier, DIGEST_LEN,
+    SignatureService, Verifier,
 };
+
 use indexmap::IndexMap;
 use mysten_util_mem::MallocSizeOf;
 use proptest_derive::Arbitrary;
@@ -25,6 +28,9 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
 };
+
+// This local constant is used throughout the file.
+const DIGEST_LEN: usize = 32;
 
 /// The round number.
 pub type Round = u64;
@@ -50,7 +56,7 @@ impl fmt::Display for BatchDigest {
     }
 }
 
-impl From<BatchDigest> for Digest {
+impl From<BatchDigest> for Digest<DIGEST_LEN> {
     fn from(digest: BatchDigest) -> Self {
         Digest::new(digest.0)
     }
@@ -62,17 +68,19 @@ impl BatchDigest {
     }
 }
 
-impl Hash for Batch {
+// FIX 2: Add the generic parameter to the Hash implementation.
+impl Hash<DIGEST_LEN> for Batch {
     type TypedDigest = BatchDigest;
 
     fn digest(&self) -> Self::TypedDigest {
-        BatchDigest::new(fastcrypto::blake2b_256(|hasher| {
-            self.0.iter().for_each(|tx| hasher.update(tx))
-        }))
+        // This hashing implementation seems to be using a newer API style.
+        let mut hasher = fastcrypto::hash::Blake2b256::default();
+        self.0.iter().for_each(|tx| hasher.update(tx));
+        BatchDigest::new(hasher.finalize().digest)
     }
 }
 
-#[derive(Builder, Clone, Default, Deserialize, MallocSizeOf, Serialize)]
+#[derive(Builder, Clone, Default, Deserialize, Serialize)]
 #[builder(pattern = "owned", build_fn(skip))]
 pub struct Header {
     pub author: PublicKey,
@@ -86,7 +94,8 @@ pub struct Header {
 }
 
 impl HeaderBuilder {
-    pub fn build<F>(self, signer: &F) -> Result<Header, fastcrypto::traits::Error>
+    // FIX 3: Correct the error type to F::Error.
+    pub fn build<F>(self, signer: &F) -> Result<Header, DagError>
     where
         F: Signer<Signature>,
     {
@@ -127,7 +136,7 @@ impl Header {
         epoch: Epoch,
         payload: IndexMap<BatchDigest, WorkerId>,
         parents: BTreeSet<CertificateDigest>,
-        signature_service: &mut SignatureService<Signature>,
+        signature_service: &mut SignatureService<Signature, DIGEST_LEN>,
     ) -> Self {
         let header = Self {
             author,
@@ -176,7 +185,7 @@ impl Header {
         }
 
         // Check the signature.
-        let id_digest: Digest = Digest::from(self.id);
+        let id_digest: Digest<DIGEST_LEN> = Digest::from(self.id);
         self.author
             .verify(id_digest.as_ref(), &self.signature)
             .map_err(DagError::from)
@@ -188,7 +197,7 @@ impl Header {
 )]
 pub struct HeaderDigest([u8; DIGEST_LEN]);
 
-impl From<HeaderDigest> for Digest {
+impl From<HeaderDigest> for Digest<DIGEST_LEN> {
     fn from(hd: HeaderDigest) -> Self {
         Digest::new(hd.0)
     }
@@ -206,23 +215,26 @@ impl fmt::Display for HeaderDigest {
     }
 }
 
-impl Hash for Header {
+// FIX 4: Add the generic parameter to the Hash implementation.
+impl Hash<DIGEST_LEN> for Header {
     type TypedDigest = HeaderDigest;
 
     fn digest(&self) -> HeaderDigest {
-        let hasher_update = |hasher: &mut VarBlake2b| {
-            hasher.update(&self.author);
+        let mut hasher = fastcrypto::hash::Blake2b256::default();
+        let hasher_update = |hasher: &mut fastcrypto::hash::Blake2b256| {
+            hasher.update(self.author.as_ref());
             hasher.update(self.round.to_le_bytes());
             hasher.update(self.epoch.to_le_bytes());
             for (x, y) in self.payload.iter() {
-                hasher.update(Digest::from(*x));
+                hasher.update(Digest::from(*x).as_ref());
                 hasher.update(y.to_le_bytes());
             }
             for x in self.parents.iter() {
-                hasher.update(Digest::from(*x))
+                hasher.update(Digest::from(*x).as_ref())
             }
         };
-        HeaderDigest(fastcrypto::blake2b_256(hasher_update))
+        hasher_update(&mut hasher);
+        HeaderDigest(hasher.finalize().digest)
     }
 }
 
@@ -269,7 +281,7 @@ impl Vote {
     pub async fn new(
         header: &Header,
         author: &PublicKey,
-        signature_service: &mut SignatureService<Signature>,
+        signature_service: &mut SignatureService<Signature, DIGEST_LEN>,
     ) -> Self {
         let vote = Self {
             id: header.id,
@@ -279,9 +291,7 @@ impl Vote {
             author: author.clone(),
             signature: Signature::default(),
         };
-        let signature = signature_service
-            .request_signature(vote.digest().into())
-            .await;
+        let signature = signature_service.request_signature(vote.digest().into()).await;
         Self { signature, ..vote }
     }
 
@@ -298,7 +308,7 @@ impl Vote {
             signature: Signature::default(),
         };
 
-        let vote_digest: Digest = vote.digest().into();
+        let vote_digest: Digest<DIGEST_LEN> = vote.digest().into();
         let signature = signer.sign(vote_digest.as_ref());
 
         Self { signature, ..vote }
@@ -321,7 +331,7 @@ impl Vote {
         );
 
         // Check the signature.
-        let vote_digest: Digest = self.digest().into();
+        let vote_digest: Digest<DIGEST_LEN> = self.digest().into();
         self.author
             .verify(vote_digest.as_ref(), &self.signature)
             .map_err(DagError::from)
@@ -330,7 +340,7 @@ impl Vote {
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Copy)]
 pub struct VoteDigest([u8; DIGEST_LEN]);
 
-impl From<VoteDigest> for Digest {
+impl From<VoteDigest> for Digest<DIGEST_LEN> {
     fn from(hd: VoteDigest) -> Self {
         Digest::new(hd.0)
     }
@@ -348,18 +358,20 @@ impl fmt::Display for VoteDigest {
     }
 }
 
-impl Hash for Vote {
+// FIX 6: Add the generic parameter to the Hash implementation.
+impl Hash<DIGEST_LEN> for Vote {
     type TypedDigest = VoteDigest;
 
     fn digest(&self) -> VoteDigest {
-        let hasher_update = |hasher: &mut VarBlake2b| {
-            hasher.update(Digest::from(self.id));
+        let mut hasher = fastcrypto::hash::Blake2b256::default();
+        let hasher_update = |hasher: &mut fastcrypto::hash::Blake2b256| {
+            hasher.update(Digest::from(self.id).as_ref());
             hasher.update(self.round.to_le_bytes());
             hasher.update(self.epoch.to_le_bytes());
-            hasher.update(&self.origin);
+            hasher.update(self.origin.as_ref());
         };
-
-        VoteDigest(fastcrypto::blake2b_256(hasher_update))
+        hasher_update(&mut hasher);
+        VoteDigest(hasher.finalize().digest)
     }
 }
 
@@ -384,7 +396,7 @@ impl PartialEq for Vote {
 }
 
 #[serde_as]
-#[derive(Clone, MallocSizeOf, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Certificate {
     pub header: Header,
     aggregated_signature: AggregateSignature,
@@ -473,8 +485,8 @@ impl Certificate {
         let aggregated_signature = if sigs.is_empty() {
             AggregateSignature::default()
         } else {
-            AggregateSignature::aggregate(sigs.into_iter().map(|(_, sig)| sig).collect())
-                .map_err(DagError::InvalidSignature)?
+            AggregateSignature::aggregate(sigs.iter().map(|(_, sig)| sig))
+                .map_err(|_| DagError::InvalidSignature(signature::Error::new()))?
         };
 
         Ok(Certificate {
@@ -539,11 +551,10 @@ impl Certificate {
         );
 
         // Verify the signatures
-        let certificate_digest: Digest = Digest::from(self.digest());
+        let certificate_digest: Digest<DIGEST_LEN> = Digest::from(self.digest());
         self.aggregated_signature
             .verify(&pks[..], certificate_digest.as_ref())
-            .map_err(|_| signature::Error::new())
-            .map_err(DagError::from)?;
+            .map_err(|_| DagError::InvalidSignature(signature::Error::new()))?;
 
         Ok(())
     }
@@ -578,7 +589,7 @@ impl AsRef<[u8]> for CertificateDigest {
     }
 }
 
-impl From<CertificateDigest> for Digest {
+impl From<CertificateDigest> for Digest<DIGEST_LEN> {
     fn from(hd: CertificateDigest) -> Self {
         Digest::new(hd.0)
     }
@@ -603,18 +614,20 @@ impl fmt::Display for CertificateDigest {
     }
 }
 
-impl Hash for Certificate {
+// FIX 8: Add the generic parameter to the Hash implementation.
+impl Hash<DIGEST_LEN> for Certificate {
     type TypedDigest = CertificateDigest;
 
     fn digest(&self) -> CertificateDigest {
-        let hasher_update = |hasher: &mut VarBlake2b| {
-            hasher.update(Digest::from(self.header.id));
+        let mut hasher = fastcrypto::hash::Blake2b256::default();
+        let hasher_update = |hasher: &mut fastcrypto::hash::Blake2b256| {
+            hasher.update(Digest::from(self.header.id).as_ref());
             hasher.update(self.round().to_le_bytes());
             hasher.update(self.epoch().to_le_bytes());
-            hasher.update(&self.origin());
+            hasher.update(self.origin().as_ref());
         };
-
-        CertificateDigest(fastcrypto::blake2b_256(hasher_update))
+        hasher_update(&mut hasher);
+        CertificateDigest(hasher.finalize().digest)
     }
 }
 
@@ -642,8 +655,10 @@ impl PartialEq for Certificate {
     }
 }
 
+// FIX 10: Add the generic parameter to the Affiliated implementation.
 impl Affiliated for Certificate {
-    fn parents(&self) -> Vec<<Self as Hash>::TypedDigest> {
+    // FIX 11: Update the function signature to match the new trait definition.
+    fn parents(&self) -> Vec<<Self as Hash<DIGEST_LEN>>::TypedDigest> {
         self.header.parents.iter().cloned().collect()
     }
 

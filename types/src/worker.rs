@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{Batch, BatchDigest};
-use blake2::digest::Update;
-
+use fastcrypto::hash::HashFunction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -67,9 +66,9 @@ pub fn serialized_batch_digest<K: AsRef<[u8]>>(sbm: K) -> Result<BatchDigest, Di
         transactions.push(tx_ref);
         offset = new_offset;
     }
-    Ok(BatchDigest::new(fastcrypto::blake2b_256(|hasher| {
-        transactions.iter().for_each(|tx| hasher.update(tx))
-    })))
+    let mut hasher = fastcrypto::hash::Blake2b256::default();
+    transactions.iter().for_each(|tx| hasher.update(tx));
+    Ok(BatchDigest::new(hasher.finalize().digest))
 }
 
 #[derive(Debug, Error)]

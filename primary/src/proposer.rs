@@ -4,7 +4,7 @@
 use crate::{metrics::PrimaryMetrics, NetworkModel};
 use config::{Committee, Epoch, WorkerId};
 use crypto::{PublicKey, Signature};
-use fastcrypto::{Digest, Hash as _, SignatureService};
+use fastcrypto::{hash::Digest, hash::Hash as _, SignatureService};
 use std::{cmp::Ordering, sync::Arc};
 use tokio::{
     sync::watch,
@@ -29,7 +29,7 @@ pub struct Proposer {
     /// The committee information.
     committee: Committee,
     /// Service to sign headers.
-    signature_service: SignatureService<Signature>,
+    signature_service: SignatureService<Signature, 32>,
     /// The size of the headers' payload.
     header_size: usize,
     /// The maximum delay to wait for batches' digests.
@@ -66,7 +66,7 @@ impl Proposer {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        signature_service: SignatureService<Signature>,
+        signature_service: SignatureService<Signature, 32>,
         header_size: usize,
         max_header_delay: Duration,
         network_model: NetworkModel,

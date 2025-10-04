@@ -35,7 +35,7 @@ impl PayloadReceiver {
     async fn run(&mut self) {
         info!("PayloadReceiver has started successfully.");
         while let Some((digest, worker_id)) = self.rx_workers.recv().await {
-            self.store.write((digest, worker_id), 0u8).await;
+            self.store.async_write((digest, worker_id), 0u8).await;
         }
     }
 }

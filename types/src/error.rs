@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::{HeaderDigest, Round};
 use config::Epoch;
-use fastcrypto::Digest;
+use fastcrypto::hash::Digest;
 use store::StoreError;
 use thiserror::Error;
 
@@ -82,10 +82,10 @@ pub enum DagError {
     HeaderRequiresQuorum(HeaderDigest),
 
     #[error("Message {0} (round {1}) too old for GC round {2}")]
-    TooOld(Digest, Round, Round),
+    TooOld(Digest<  32        >, Round, Round), 
 
     #[error("Vote {0} (round {1}) too old for round {2}")]
-    VoteTooOld(Digest, Round, Round),
+    VoteTooOld(Digest<32>, Round, Round),
 
     #[error("Invalid epoch (expected {expected}, received {received})")]
     InvalidEpoch { expected: Epoch, received: Epoch },

@@ -4,7 +4,7 @@ use crate::{utils, PayloadToken};
 use config::{Committee, SharedWorkerCache, WorkerId};
 use consensus::dag::{Dag, ValidatorDagError};
 use crypto::PublicKey;
-use fastcrypto::{Digest, Hash};
+use fastcrypto::hash::{Digest, Hash};
 use futures::{
     future::{join_all, try_join_all, BoxFuture},
     stream::{futures_unordered::FuturesUnordered, StreamExt as _},
