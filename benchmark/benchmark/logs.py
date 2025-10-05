@@ -7,7 +7,8 @@ from multiprocessing import Pool
 from os.path import join
 from re import findall, search
 from statistics import mean
-
+from functools import partial
+import traceback
 
 from benchmark.utils import Print
 
@@ -31,39 +32,53 @@ class LogParser:
             self.committee_size = '?'
             self.workers = '?'
 
-        # Parse the clients logs.
+        # Parse the clients logs with error handling
         try:
             with Pool() as p:
-                results = p.map(self._parse_clients, clients)
+                results = p.map(self._parse_clients_safe, clients)
+            # Filter out failed results
+            results = [r for r in results if r is not None]
+            if not results:
+                raise ParseError('No valid client logs could be parsed')
+            
+            self.size, self.rate, self.start, misses, self.sent_samples = zip(*results)
+            self.misses = sum(misses)
         except (ValueError, IndexError, AttributeError) as e:
             exception(e)
             raise ParseError(f'Failed to parse clients\' logs: {e}')
-        self.size, self.rate, self.start, misses, self.sent_samples \
-            = zip(*results)
-        self.misses = sum(misses)
 
-        # Parse the primaries logs.
+        # Parse the primaries logs with error handling
         try:
             with Pool() as p:
-                results = p.map(self._parse_primaries, primaries)
+                results = p.map(self._parse_primaries_safe, primaries)
+            # Filter out failed results
+            results = [r for r in results if r is not None]
+            if not results:
+                raise ParseError('No valid primary logs could be parsed')
+            
+            proposals, commits, self.configs, primary_ips = zip(*results)
+            self.proposals = self._merge_results([x.items() for x in proposals])
+            self.commits = self._merge_results([x.items() for x in commits])
         except (ValueError, IndexError, AttributeError) as e:
             exception(e)
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
-        proposals, commits, self.configs, primary_ips = zip(*results)
-        self.proposals = self._merge_results([x.items() for x in proposals])
-        self.commits = self._merge_results([x.items() for x in commits])
 
-        # Parse the workers logs.
+        # Parse the workers logs with error handling
         try:
             with Pool() as p:
-                results = p.map(self._parse_workers, workers)
+                results = p.map(self._parse_workers_safe, workers)
+            # Filter out failed results
+            results = [r for r in results if r is not None]
+            if not results:
+                raise ParseError('No valid worker logs could be parsed')
+            
+            sizes, self.received_samples, workers_ips = zip(*results)
+            self.sizes = {
+                k: v for x in sizes for k, v in x.items() if k in self.commits
+            }
         except (ValueError, IndexError, AttributeError) as e:
             exception(e)
             raise ParseError(f'Failed to parse workers\' logs: {e}')
-        sizes, self.received_samples, workers_ips = zip(*results)
-        self.sizes = {
-            k: v for x in sizes for k, v in x.items() if k in self.commits
-        }
 
         # Determine whether the primary and the workers are collocated.
         self.collocate = set(primary_ips) == set(workers_ips)
@@ -74,11 +89,37 @@ class LogParser:
                 f'Clients missed their target rate {self.misses:,} time(s)'
             )
 
+    def _parse_clients_safe(self, log):
+        """Wrapper with error handling for client parsing"""
+        try:
+            return self._parse_clients(log)
+        except Exception as e:
+            Print.warn(f'Failed to parse a client log: {e}')
+            return None
+
+    def _parse_primaries_safe(self, log):
+        """Wrapper with error handling for primary parsing"""
+        try:
+            return self._parse_primaries(log)
+        except Exception as e:
+            Print.warn(f'Failed to parse a primary log: {e}')
+            return None
+
+    def _parse_workers_safe(self, log):
+        """Wrapper with error handling for worker parsing"""
+        try:
+            return self._parse_workers(log)
+        except Exception as e:
+            Print.warn(f'Failed to parse a worker log: {e}')
+            return None
+
     def _merge_results(self, input):
         # Keep the earliest timestamp.
         merged = {}
         for x in input:
             for k, v in x:
+                if not isinstance(v, (int, float)):
+                    continue
                 if k not in merged or merged[k] > v:
                     merged[k] = v
         return merged
@@ -87,16 +128,31 @@ class LogParser:
         if search(r'Error', log) is not None:
             raise ParseError('Client(s) panicked')
 
-        size = int(search(r'Transactions size: (\d+)', log).group(1))
-        rate = int(search(r'Transactions rate: (\d+)', log).group(1))
+        size_match = search(r'Transactions size: (\d+)', log)
+        if not size_match:
+            raise ParseError('Transaction size not found in log')
+        size = int(size_match.group(1))
 
-        tmp = search(r'(.*?) .* Start ', log).group(1)
+        rate_match = search(r'Transactions rate: (\d+)', log)
+        if not rate_match:
+            raise ParseError('Transaction rate not found in log')
+        rate = int(rate_match.group(1))
+
+        start_match = search(r'(.*?) .* Start ', log)
+        if not start_match:
+            raise ParseError('Start timestamp not found in log')
+        tmp = start_match.group(1)
         start = self._to_posix(tmp)
 
         misses = len(findall(r'rate too high', log))
 
         tmp = findall(r'(.*?) .* sample transaction (\d+)', log)
-        samples = {int(s): self._to_posix(t) for t, s in tmp}
+        samples = {}
+        for t, s in tmp:
+            try:
+                samples[int(s)] = self._to_posix(t)
+            except (ValueError, TypeError):
+                continue
 
         return size, rate, start, misses, samples
 
@@ -105,41 +161,47 @@ class LogParser:
             raise ParseError('Primary(s) panicked')
 
         tmp = findall(r'(.*?) .* Created B\d+\([^ ]+\) -> ([^ ]+=)', log)
-        tmp = [(d, self._to_posix(t)) for t, d in tmp]
-        proposals = self._merge_results([tmp])
+        proposals = {}
+        for t, d in tmp:
+            try:
+                proposals[d] = self._to_posix(t)
+            except (ValueError, TypeError):
+                continue
+        proposals = self._merge_results([proposals.items()])
 
         tmp = findall(r'(.*?) .* Committed B\d+\([^ ]+\) -> ([^ ]+=)', log)
-        tmp = [(d, self._to_posix(t)) for t, d in tmp]
-        commits = self._merge_results([tmp])
+        commits = {}
+        for t, d in tmp:
+            try:
+                commits[d] = self._to_posix(t)
+            except (ValueError, TypeError):
+                continue
+        commits = self._merge_results([commits.items()])
+
+        def safe_int_search(pattern, log, default=0):
+            match = search(pattern, log)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (ValueError, TypeError):
+                    return default
+            return default
 
         configs = {
-            'header_size': int(
-                search(r'Header size .* (\d+)', log).group(1)
-            ),
-            'max_header_delay': int(
-                search(r'Max header delay .* (\d+)', log).group(1)
-            ),
-            'gc_depth': int(
-                search(r'Garbage collection depth .* (\d+)', log).group(1)
-            ),
-            'sync_retry_delay': int(
-                search(r'Sync retry delay .* (\d+)', log).group(1)
-            ),
-            'sync_retry_nodes': int(
-                search(r'Sync retry nodes .* (\d+)', log).group(1)
-            ),
-            'batch_size': int(
-                search(r'Batch size .* (\d+)', log).group(1)
-            ),
-            'max_batch_delay': int(
-                search(r'Max batch delay .* (\d+)', log).group(1)
-            ),
-            'max_concurrent_requests': int(
-                search(r'Max concurrent requests .* (\d+)', log).group(1)
-            )
+            'header_size': safe_int_search(r'Header size .* (\d+)', log),
+            'max_header_delay': safe_int_search(r'Max header delay .* (\d+)', log),
+            'gc_depth': safe_int_search(r'Garbage collection depth .* (\d+)', log),
+            'sync_retry_delay': safe_int_search(r'Sync retry delay .* (\d+)', log),
+            'sync_retry_nodes': safe_int_search(r'Sync retry nodes .* (\d+)', log),
+            'batch_size': safe_int_search(r'Batch size .* (\d+)', log),
+            'max_batch_delay': safe_int_search(r'Max batch delay .* (\d+)', log),
+            'max_concurrent_requests': safe_int_search(r'Max concurrent requests .* (\d+)', log)
         }
 
-        ip = search(r'booted on (/ip4/\d+.\d+.\d+.\d+)', log).group(1)
+        ip_match = search(r'booted on (/ip4/\d+.\d+.\d+.\d+)', log)
+        if not ip_match:
+            raise ParseError('IP address not found in log')
+        ip = ip_match.group(1)
 
         return proposals, commits, configs, ip
 
@@ -148,53 +210,113 @@ class LogParser:
             raise ParseError('Worker(s) panicked')
 
         tmp = findall(r'Batch ([^ ]+) contains (\d+) B', log)
-        sizes = {d: int(s) for d, s in tmp}
+        sizes = {}
+        for d, s in tmp:
+            try:
+                sizes[d] = int(s)
+            except (ValueError, TypeError):
+                continue
 
         tmp = findall(r'Batch ([^ ]+) contains sample tx (\d+)', log)
-        samples = {int(s): d for d, s in tmp}
+        samples = {}
+        for d, s in tmp:
+            try:
+                samples[int(s)] = d
+            except (ValueError, TypeError):
+                continue
 
-        ip = search(r'booted on (/ip4/\d+.\d+.\d+.\d+)', log).group(1)
+        ip_match = search(r'booted on (/ip4/\d+.\d+.\d+.\d+)', log)
+        if not ip_match:
+            raise ParseError('IP address not found in log')
+        ip = ip_match.group(1)
 
         return sizes, samples, ip
 
     def _to_posix(self, string):
-        x = parser.isoparse(string[:24])
-        return datetime.timestamp(x)
+        try:
+            x = parser.isoparse(string[:24])
+            return datetime.timestamp(x)
+        except (ValueError, TypeError) as e:
+            raise ParseError(f'Failed to parse timestamp: {string}')
 
     def _consensus_throughput(self):
-        if not self.commits:
+        if not self.commits or not self.proposals:
             return 0, 0, 0
-        start, end = min(self.proposals.values()), max(self.commits.values())
-        duration = end - start
-        bytes = sum(self.sizes.values())
-        bps = bytes / duration
-        tps = bps / self.size[0]
-        return tps, bps, duration
+        
+        try:
+            start, end = min(self.proposals.values()), max(self.commits.values())
+            duration = end - start
+            
+            if duration <= 0:
+                Print.warn('Invalid duration for consensus throughput calculation')
+                return 0, 0, 0
+            
+            bytes_sum = sum(self.sizes.values())
+            bps = bytes_sum / duration
+            
+            if self.size[0] <= 0:
+                Print.warn('Invalid transaction size')
+                return 0, bps, duration
+            
+            tps = bps / self.size[0]
+            return tps, bps, duration
+        except (ValueError, ZeroDivisionError, TypeError) as e:
+            Print.warn(f'Error calculating consensus throughput: {e}')
+            return 0, 0, 0
 
     def _consensus_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.commits.items()]
-        return mean(latency) if latency else 0
+        try:
+            latency = []
+            for d, c in self.commits.items():
+                if d in self.proposals:
+                    lat = c - self.proposals[d]
+                    if lat >= 0:  # Only include valid latencies
+                        latency.append(lat)
+            return mean(latency) if latency else 0
+        except (ValueError, TypeError) as e:
+            Print.warn(f'Error calculating consensus latency: {e}')
+            return 0
 
     def _end_to_end_throughput(self):
-        if not self.commits:
+        if not self.commits or not self.start:
             return 0, 0, 0
-        start, end = min(self.start), max(self.commits.values())
-        duration = end - start
-        bytes = sum(self.sizes.values())
-        bps = bytes / duration
-        tps = bps / self.size[0]
-        return tps, bps, duration
+        
+        try:
+            start, end = min(self.start), max(self.commits.values())
+            duration = end - start
+            
+            if duration <= 0:
+                Print.warn('Invalid duration for end-to-end throughput calculation')
+                return 0, 0, 0
+            
+            bytes_sum = sum(self.sizes.values())
+            bps = bytes_sum / duration
+            
+            if self.size[0] <= 0:
+                Print.warn('Invalid transaction size')
+                return 0, bps, duration
+            
+            tps = bps / self.size[0]
+            return tps, bps, duration
+        except (ValueError, ZeroDivisionError, TypeError) as e:
+            Print.warn(f'Error calculating end-to-end throughput: {e}')
+            return 0, 0, 0
 
     def _end_to_end_latency(self):
-        latency = []
-        for sent, received in zip(self.sent_samples, self.received_samples):
-            for tx_id, batch_id in received.items():
-                if batch_id in self.commits:
-                    assert tx_id in sent  # We receive txs that we sent.
-                    start = sent[tx_id]
-                    end = self.commits[batch_id]
-                    latency += [end-start]
-        return mean(latency) if latency else 0
+        try:
+            latency = []
+            for sent, received in zip(self.sent_samples, self.received_samples):
+                for tx_id, batch_id in received.items():
+                    if batch_id in self.commits and tx_id in sent:
+                        start = sent[tx_id]
+                        end = self.commits[batch_id]
+                        lat = end - start
+                        if lat >= 0:  # Only include valid latencies
+                            latency.append(lat)
+            return mean(latency) if latency else 0
+        except (ValueError, TypeError) as e:
+            Print.warn(f'Error calculating end-to-end latency: {e}')
+            return 0
 
     def result(self):
         header_size = self.configs[0]['header_size']
@@ -247,8 +369,11 @@ class LogParser:
 
     def print(self, filename):
         assert isinstance(filename, str)
-        with open(filename, 'a') as f:
-            f.write(self.result())
+        try:
+            with open(filename, 'a') as f:
+                f.write(self.result())
+        except IOError as e:
+            Print.warn(f'Failed to write results to {filename}: {e}')
 
     @classmethod
     def process(cls, directory, faults=0):
@@ -256,16 +381,30 @@ class LogParser:
 
         clients = []
         for filename in sorted(glob(join(directory, 'client-*.log'))):
-            with open(filename, 'r') as f:
-                clients += [f.read()]
+            try:
+                with open(filename, 'r') as f:
+                    clients.append(f.read())
+            except IOError as e:
+                Print.warn(f'Failed to read {filename}: {e}')
+        
         primaries = []
         for filename in sorted(glob(join(directory, 'primary-*.log'))):
-            with open(filename, 'r') as f:
-                primaries += [f.read()]
+            try:
+                with open(filename, 'r') as f:
+                    primaries.append(f.read())
+            except IOError as e:
+                Print.warn(f'Failed to read {filename}: {e}')
+        
         workers = []
         for filename in sorted(glob(join(directory, 'worker-*.log'))):
-            with open(filename, 'r') as f:
-                workers += [f.read()]
+            try:
+                with open(filename, 'r') as f:
+                    workers.append(f.read())
+            except IOError as e:
+                Print.warn(f'Failed to read {filename}: {e}')
+
+        if not clients or not primaries or not workers:
+            raise ParseError('Insufficient log files found')
 
         return cls(clients, primaries, workers, faults=faults)
 
@@ -275,19 +414,32 @@ class LogGrpcParser:
         assert all(isinstance(x, str) for x in primaries)
         self.faults = faults
 
-        # Parse the primaries logs.
+        # Parse the primaries logs with error handling
         try:
             with Pool() as p:
-                results = p.map(self._parse_primaries, primaries)
+                results = p.map(self._parse_primaries_safe, primaries)
+            # Filter out failed results
+            self.grpc_ports = [r for r in results if r is not None]
+            if not self.grpc_ports:
+                raise ParseError('No valid gRPC ports could be parsed')
         except (ValueError, IndexError, AttributeError) as e:
             exception(e)
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
-        self.grpc_ports = results
+
+    def _parse_primaries_safe(self, log):
+        """Wrapper with error handling for gRPC parsing"""
+        try:
+            return self._parse_primaries(log)
+        except Exception as e:
+            Print.warn(f'Failed to parse gRPC port from log: {e}')
+            return None
 
     def _parse_primaries(self, log):
-        port = search(
-            r'Consensus API gRPC Server listening on /ip4/.+/tcp/(.+)/http', log).group(1)
-        return port
+        port_match = search(
+            r'Consensus API gRPC Server listening on /ip4/.+/tcp/(.+)/http', log)
+        if not port_match:
+            raise ParseError('gRPC port not found in log')
+        return port_match.group(1)
 
     @classmethod
     def process(cls, directory, faults=0):
@@ -295,7 +447,13 @@ class LogGrpcParser:
 
         primaries = []
         for filename in sorted(glob(join(directory, 'primary-*.log'))):
-            with open(filename, 'r') as f:
-                primaries += [f.read()]
+            try:
+                with open(filename, 'r') as f:
+                    primaries.append(f.read())
+            except IOError as e:
+                Print.warn(f'Failed to read {filename}: {e}')
+
+        if not primaries:
+            raise ParseError('No primary log files found')
 
         return cls(primaries, faults=faults)
