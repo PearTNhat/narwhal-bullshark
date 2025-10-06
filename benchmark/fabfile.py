@@ -16,9 +16,9 @@ def local(ctx, debug=True):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
-        'nodes': 4,
+        'nodes': 3,
         'workers': 1,
-        'rate': 50_000,
+        'rate': 100_000,
         'tx_size': 512,
         'duration': 20,
         'mem_profiling': False
@@ -29,7 +29,7 @@ def local(ctx, debug=True):
         'gc_depth': 50,  # rounds
         'sync_retry_delay': '10_000ms',  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 500_000,  # bytes
+        'batch_size': 1_000,  # bytes
         'max_batch_delay': '200ms',  # ms,
         'block_synchronizer': {
             'range_synchronize_timeout': '30_000ms',
